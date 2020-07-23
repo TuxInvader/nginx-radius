@@ -4,5 +4,10 @@
 
 == Introduction
 
-TODO Docs
+This repo includes an NGINX Stream configuration for load balancing RADIUS
+
+The Javascript file is NGINX NJS, which can inspect RADIUS traffic and provide session persistence for Access-Challenges during authentication, you can also use it to add additional Attribute pairs to the RADIUS packets, and update the Message-Authenticator when you do so.
+
+
+:wq
 
