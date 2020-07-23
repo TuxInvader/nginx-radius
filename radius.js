@@ -3,10 +3,12 @@
 var debug_level = 3;
 
 // The state value for session persistence
-var session_state = ""
+var session_state = "";
 
+// packet type enum object
 var pkt_type = Object.freeze({
-  ACCESS_REQUEST:        1,
+
+  ACCESS_REQUEST:        1, 
   ACCESS_ACCEPT:         2,
   ACCESS_REJECT:         3,
   ACCOUNTING_REQUEST:    4,
@@ -15,29 +17,34 @@ var pkt_type = Object.freeze({
   STATUS_SERVER:         12,
   STATUS_CLIENT:         13,
   RESERVED:             255,
+
   value: {1: "ACCESS_REQUEST", 2: "ACCESS_ACCEPT", 3: "ACCESS_REJECT", 
          4: "ACCOUNTING_REQUEST", 5: "ACCOUNTING_RESPONSE",
          11: "ACCESS_CHALLENGE", 12: "STATUS_SERVER", 13: "STATUS_CLIENT",
          255: "RESERVED"}
+
 });
 
-var value_type = Object.freeze({
-  TEXT:    1,
-  STRING:  2,
-  value: {1: "TEXT", 2: "STRING" }
-});
-
+// Attribute type enum object
 var avp_type = Object.freeze({
-  USER_NAME:         1,
-  USER_PASSWORD:     2,
-  CHAP_PASSWORD:     3,
-  NAS_IP_ADDRESS:    4,
-  NAS_Port:          5,
-  STATE:             24,
-  NAS_IDENTIFIER:    32,
+
+  USER_NAME:             1,
+  USER_PASSWORD:         2,
+  CHAP_PASSWORD:         3,
+  NAS_IP_ADDRESS:        4,
+  NAS_Port:              5,
+  STATE:                 24,
+  NAS_IDENTIFIER:        32,
+  MESSAGE_AUTHENTICATOR: 80,
+
   value: {1: "USER_NAME", 2: "USER_PASSWORD", 3: "CHAP_PASSWORD",
          4: "NAS_IP_ADDRESS", 5: "NAS_Port", 
-         24: "STATE", 32: "NAS_IDENTIFIER" }
+         24: "STATE", 32: "NAS_IDENTIFIER", 80: "MESSAGE_AUTHENTICATOR"},
+
+  format: {1: "TEXT", 2: "STRING", 3: "STRING",
+          4: "IPV4ADDR", 5: "INTEGER", 
+          24: "STRING", 32: "STRING", 80: "STRING" }
+
 });
 
 // debug function, set debug_level above
@@ -67,16 +74,17 @@ function to_bytes32( number ) {
   return String.fromCodePoint( (number>>24)&0xff, (number>>16)&0xff, (number>>8)&0xff, number&0xff ).toBytes();
 }
 
+// Update the length field to match the size of the packet
 function update_length(data) {
-  //var length = to_int( data.codePointAt(2), data.codePointAt(3) ) + len;
   return data.slice(0,2) + to_bytes(data.length) + data.slice(4);
 }
 
-function add_attribute(data, type, attr, value) {
+// Add an additional AV Pair to the packet
+function add_attribute(data, attr, value) {
   var len;
-  switch(type) {
-    case value_type.TEXT:
-    case value_type.STRING:
+  switch(avp_type.format[attr]) {
+    case "TEXT":
+    case "STRING":
       len = 2 + value.length; // Length includes type and length
       data += String.fromCharCode(attr) + String.fromCharCode(len) + value;
       break;
@@ -84,6 +92,7 @@ function add_attribute(data, type, attr, value) {
   return data;
 }
 
+// Search for and retrieve attributes matching the search
 function get_attribute_values(s, data, search) {
   var length = data.length;
   var index = 20;
@@ -91,7 +100,7 @@ function get_attribute_values(s, data, search) {
   while (index < data.length ) {
     var type = data.codePointAt(index);
     var length = data.codePointAt(index+1);
-    debug(s, 3, "get_attribute_value: checking: " + type.toString() + ", length: " + length);
+    debug(s, 3, "get_attribute_value: checking: " + ( avp_type.value[type] || type.toString() ) + ", length: " + length);
     if ( type == search ) {
       var result = data.slice(index+2, index+length)
       results.push( result );
@@ -102,15 +111,15 @@ function get_attribute_values(s, data, search) {
   return results;
 }
 
-
+// Update the Message-Authenticator attribute (if we modified something)
 function update_msg_auth(s, data) {
   var length = data.length;
   var index = 20;
   while (index < data.length ) {
     var type = data.codePointAt(index);
     var length = data.codePointAt(index+1);
-    debug(s, 3, "update_msg_auth: checking: " + type.toString() + ", length: " + length);
-    if ( type == 80 ) {
+    debug(s, 3, "update_msg_auth: checking: " + ( avp_type.value[type] || type.toString() ) + ", length: " + length);
+    if ( type == avp_type.MESSAGE_AUTHENTICATOR ) {
       debug(s, 1, "update_msg_auth: Updating Message-Authentication." );
       data = data.slice(0,index+2) + Array(16).fill( String.fromCodePoint(0x00) ).join('') + data.slice(index+length);
       debug(s, 3, "update_msg_auth: Regenerating Message-Authentication with: " + data.toString('hex') );
@@ -126,6 +135,7 @@ function update_msg_auth(s, data) {
   return data;
 }
 
+// The main parser function
 function radius_parser(s) {
 
   s.on("upload", function(data,flags) {
@@ -138,8 +148,16 @@ function radius_parser(s) {
     debug(s, 1, "radius_parser: Incoming Request Packet: Type: " + pkt_type.value[code] );
     debug(s, 2, "radius_parser: In Req Dump: " + data.toString('hex') );
 
+    // Access Request - if client provided state, use for persistence
+    if ( code == pkt_type.ACCESS_REQUEST ) {
+      var state = get_attribute_values(s, data, avp_type.STATE);
+      if ( state.length == 1 ) {
+        session_state = state[0];
+      }
+    } 
+
     // Add Attributes here
-    data = add_attribute(data, value_type.TEXT, avp_type.NAS_IDENTIFIER, "NGINX Plus");
+    data = add_attribute(data, avp_type.NAS_IDENTIFIER, "NGINX Plus");
 
     // Update the packet length (needed if packet is modified)
     data = update_length(data)
@@ -161,15 +179,15 @@ function radius_parser(s) {
     debug(s, 1, "radius_parser: Incoming Response Packet: Type: " + pkt_type.value[code] );
     debug(s, 2, "radius_parser: In Res Packet: " + data.toString('hex') );
 
-    // Access Challenge
+    // Access Challenge - Use State for persistence
     if ( code == pkt_type.ACCESS_CHALLENGE ) {
       var state = get_attribute_values(s, data, avp_type.STATE);
-      if ( state.length() == 1 ) {
+      if ( state.length == 1 ) {
         session_state = state[0];
+        var server = s.variables.upstream_addr.split(',').pop().split(':')[0].trim();
+        s.variables.persistence = server;
       }
-    } else if ( code == pkt_type.ACCESS_ACCEPT ) {
-      get_attribute_values(s, data, 99);
-    }
+    } 
 
     debug(s, 2, "radius_parser: Out Res Packet: " + data.toString('hex') );
     s.send(data);
@@ -177,6 +195,7 @@ function radius_parser(s) {
 
 }
 
+// Return the session_state to NGINX
 function get_state(s) {
   return session_state;
 }
